@@ -1,0 +1,923 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Tennis Swing Analyzer — Prototype</title>
+<style>
+  :root {
+    --bg: #12181f;
+    --panel: #1b232d;
+    --accent: #d4ff3f;
+    --text: #e8ecef;
+    --muted: #8a97a6;
+    --good: #6fdc8c;
+    --warn: #ffb74d;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    padding: 24px;
+  }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  p.subtitle { color: var(--muted); margin: 0 0 20px; font-size: 14px; max-width: 720px; }
+  .assumption {
+    background: #22303d;
+    border-left: 3px solid var(--accent);
+    padding: 10px 14px;
+    font-size: 13px;
+    color: var(--muted);
+    border-radius: 4px;
+    margin-bottom: 20px;
+    max-width: 720px;
+  }
+  .layout { display: flex; gap: 24px; flex-wrap: wrap; align-items: flex-start; }
+  .stage {
+    position: relative;
+    background: #000;
+    border-radius: 10px;
+    overflow: hidden;
+    max-width: 640px;
+    width: 100%;
+    line-height: 0;
+  }
+  video, canvas { width: 100%; display: block; }
+  canvas { position: absolute; top: 0; left: 0; pointer-events: none; }
+  .panel {
+    background: var(--panel);
+    border-radius: 10px;
+    padding: 20px;
+    min-width: 300px;
+    flex: 1;
+  }
+  .panel h2 {
+    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--muted);
+    margin: 0 0 12px;
+  }
+  label { font-size: 13px; color: var(--muted); display: block; margin-bottom: 6px; }
+  input[type="file"], input[type="number"] {
+    color: var(--text);
+    background: #0f151b;
+    border: 1px solid #2a3540;
+    border-radius: 6px;
+    padding: 6px 8px;
+    font-size: 13px;
+    width: 100%;
+  }
+  .field { margin-bottom: 14px; }
+  button {
+    background: var(--accent);
+    color: #12181f;
+    border: none;
+    border-radius: 6px;
+    padding: 10px 16px;
+    font-weight: 600;
+    cursor: pointer;
+    margin-top: 4px;
+    font-size: 14px;
+    width: 100%;
+  }
+  button:disabled { opacity: 0.4; cursor: default; }
+  button.secondary { background: #2a3540; color: var(--text); }
+  .status { font-size: 13px; color: var(--muted); margin-top: 10px; min-height: 18px; }
+  .progress-bar {
+    height: 4px;
+    background: #2a3540;
+    border-radius: 2px;
+    overflow: hidden;
+    margin-top: 8px;
+  }
+  .progress-fill { height: 100%; background: var(--accent); width: 0%; transition: width 0.1s linear; }
+
+  .report { margin-top: 24px; }
+  .metric-row {
+    display: flex; justify-content: space-between;
+    padding: 8px 0; border-bottom: 1px solid #2a3540; font-size: 14px;
+  }
+  .metric-row:last-child { border-bottom: none; }
+  .metric-value { color: var(--accent); font-variant-numeric: tabular-nums; font-weight: 600; }
+  .feedback-list { list-style: none; padding: 0; margin: 12px 0 0; }
+  .feedback-list li {
+    font-size: 13.5px; line-height: 1.5;
+    padding: 10px 12px; border-radius: 6px;
+    margin-bottom: 8px; background: #22303d;
+    border-left: 3px solid var(--muted);
+  }
+  .feedback-list li.good { border-left-color: var(--good); }
+  .feedback-list li.warn { border-left-color: var(--warn); }
+  .caveat { font-size: 11.5px; color: var(--muted); margin-top: 14px; line-height: 1.5; }
+</style>
+</head>
+<body>
+
+<h1>Tennis Swing Analyzer — Prototype</h1>
+<p class="subtitle">Upload a swing clip, run a full analysis pass, and get estimated racket-hand speed plus a few rule-based technique notes.</p>
+
+<div class="assumption">
+  <strong>Camera assumption for this version:</strong> filmed from the side
+  (roughly perpendicular to the swing direction), with the player fully in
+  frame including feet, standing still and upright for at least one moment
+  early in the clip (e.g. the ready position) — that frame is used to
+  calibrate real-world scale from your height.
+</div>
+
+<div class="assumption" style="border-left-color:#ff6b6b;">
+  <strong>Setup required:</strong> this uses real Supabase auth/database
+  and real Stripe payments. See README.md for the full setup steps
+  (Supabase project + SQL schema, Stripe products/prices, deploying the
+  two Edge Functions, and filling in config values below) before this
+  will work end to end.
+</div>
+
+<div class="panel" id="planStatus" style="max-width:980px; margin-bottom:20px; display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px;">
+  <div>
+    <strong id="planLabel">Plan: Anonymous</strong>
+    <div class="status" id="planDetail" style="margin-top:2px;"></div>
+  </div>
+  <div style="display:flex; gap:8px;">
+    <button id="accountBtn" class="secondary" style="width:auto; padding:8px 14px;">Sign in / Create account</button>
+    <button id="resetDemoBtn" class="secondary" style="width:auto; padding:8px 14px;">Reset anonymous state</button>
+  </div>
+</div>
+
+<div id="gateOverlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:50; align-items:center; justify-content:center;">
+  <div style="background:var(--panel); border-radius:12px; padding:28px; max-width:420px; width:90%;">
+    <h2 id="gateTitle" style="margin-top:0;">Create a free account</h2>
+    <p id="gateBody" style="font-size:14px; color:var(--muted); line-height:1.5;"></p>
+    <div id="gateSignupFields" style="display:none;">
+      <div class="field"><label>Email</label><input type="text" id="gateEmail" placeholder="you@example.com" /></div>
+      <div class="field"><label>Password</label><input type="password" id="gatePassword" placeholder="At least 6 characters" /></div>
+      <button id="gateSignupBtn">Create account</button>
+      <button id="gateSigninBtn" class="secondary" style="margin-top:8px;">Sign in instead</button>
+      <div class="status" id="gateAuthStatus"></div>
+    </div>
+
+    <div id="gatePaywallFields" style="display:none;">
+      <button id="gateSubscribeBtn">Subscribe — $6.99/mo (demo)</button>
+      <button id="gatePayOnceBtn" class="secondary" style="margin-top:8px;">Pay $1.49 for this analysis (demo)</button>
+    </div>
+    <button id="gateCancelBtn" class="secondary" style="margin-top:14px;">Cancel</button>
+  </div>
+</div>
+
+<div class="layout">
+  <div class="stage" id="stage">
+    <video id="video" playsinline muted></video>
+    <canvas id="overlay"></canvas>
+  </div>
+
+  <div class="panel">
+    <h2>Setup</h2>
+    <div class="field">
+      <label for="fileInput">Swing video</label>
+      <input type="file" id="fileInput" accept="video/*" />
+    </div>
+    <div class="field">
+      <label for="heightInput">Your height (cm) — used to convert pixels to real speed</label>
+      <input type="number" id="heightInput" placeholder="e.g. 178" min="100" max="230" />
+    </div>
+    <div class="field">
+      <label for="labelInput">Session label (optional) — e.g. "forehand", "Tue practice"</label>
+      <input type="text" id="labelInput" placeholder="e.g. forehand" />
+    </div>
+    <button id="analyzeBtn" disabled>Analyze Swing</button>
+    <button id="playBtn" class="secondary" disabled style="margin-top:8px;">Play With Overlay</button>
+    <div class="status" id="status">Loading pose model…</div>
+    <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
+
+    <div class="report" id="report" style="display:none;">
+      <h2>Estimated metrics</h2>
+      <div class="metric-row"><span>Peak racket-hand speed</span><span class="metric-value" id="mSpeed">—</span></div>
+      <div class="metric-row"><span>Elbow angle at contact</span><span class="metric-value" id="mElbow">—</span></div>
+      <div class="metric-row"><span>Front-knee bend at contact</span><span class="metric-value" id="mKnee">—</span></div>
+      <div class="metric-row"><span>Torso lean at contact</span><span class="metric-value" id="mTorso">—</span></div>
+
+      <h2 style="margin-top:20px;">Feedback</h2>
+      <ul class="feedback-list" id="feedbackList"></ul>
+
+      <p class="caveat">
+        These thresholds are rough starting heuristics for this prototype, not
+        verified coaching standards — treat them as a first draft to refine
+        against real technique references, not final advice. "Contact" is
+        estimated as the frame with peak wrist speed, since there's no ball
+        tracking yet, so it can be off by a frame or two.
+      </p>
+    </div>
+  </div>
+</div>
+
+<div class="panel" id="historyPanel" style="max-width: 980px; margin-top: 24px; display:none;">
+  <h2 style="display:flex; justify-content:space-between; align-items:center;">
+    <span>Your progress (pro-tier concept: saved locally in this browser)</span>
+    <button id="clearHistoryBtn" class="secondary" style="width:auto; padding:6px 12px; font-size:12px;">Clear history</button>
+  </h2>
+  <table id="historyTable" style="width:100%; border-collapse: collapse; font-size:13px;">
+    <thead>
+      <tr style="color:var(--muted); text-align:left;">
+        <th style="padding:6px 8px; border-bottom:1px solid #2a3540;">Date</th>
+        <th style="padding:6px 8px; border-bottom:1px solid #2a3540;">Label</th>
+        <th style="padding:6px 8px; border-bottom:1px solid #2a3540;">Speed</th>
+        <th style="padding:6px 8px; border-bottom:1px solid #2a3540;">Elbow</th>
+        <th style="padding:6px 8px; border-bottom:1px solid #2a3540;">Knee bend</th>
+        <th style="padding:6px 8px; border-bottom:1px solid #2a3540;">Torso lean</th>
+      </tr>
+    </thead>
+    <tbody id="historyBody"></tbody>
+  </table>
+  <p class="caveat">
+    This is a working demo of what a "pro" tier could offer: every analyzed
+    swing is saved (right now, just in this browser's local storage) so you
+    can see trends across sessions instead of a one-off score. A real
+    pro version would sync this to an account so it follows you across
+    devices, and would chart trends visually rather than just listing rows.
+  </p>
+</div>
+
+<script type="module">
+import {
+  PoseLandmarker,
+  FilesetResolver,
+  DrawingUtils
+} from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+
+// --- Fill these in after creating your Supabase project ---
+// Dashboard → Project Settings → API → "Project URL" and "anon public" key.
+// These are safe to expose in client code — Supabase's row-level security
+// (set up in supabase-schema.sql) is what actually protects the data.
+const SUPABASE_URL = "YOUR_SUPABASE_PROJECT_URL";
+const SUPABASE_ANON_KEY = "YOUR_SUPABASE_ANON_KEY";
+const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+const statusEl = document.getElementById("status");
+const video = document.getElementById("video");
+const canvas = document.getElementById("overlay");
+const ctx = canvas.getContext("2d");
+const fileInput = document.getElementById("fileInput");
+const heightInput = document.getElementById("heightInput");
+const analyzeBtn = document.getElementById("analyzeBtn");
+const playBtn = document.getElementById("playBtn");
+const progressFill = document.getElementById("progressFill");
+const reportEl = document.getElementById("report");
+const feedbackListEl = document.getElementById("feedbackList");
+const labelInput = document.getElementById("labelInput");
+const historyPanel = document.getElementById("historyPanel");
+const historyBody = document.getElementById("historyBody");
+const clearHistoryBtn = document.getElementById("clearHistoryBtn");
+
+function renderHistoryRows(history) {
+  if (history.length === 0) {
+    historyPanel.style.display = "none";
+    return;
+  }
+  historyPanel.style.display = "block";
+  historyBody.innerHTML = "";
+  history.forEach((entry, i) => {
+    const prev = i > 0 ? history[i - 1] : null;
+    const row = document.createElement("tr");
+    const cell = (text) => {
+      const td = document.createElement("td");
+      td.style.padding = "6px 8px";
+      td.style.borderBottom = "1px solid #22303d";
+      td.textContent = text;
+      return td;
+    };
+    // Note: shows direction of change only, not a judgment of "better" —
+    // several of these metrics (elbow, knee, torso lean) have an ideal
+    // range rather than "more/less is always better," so speed is the
+    // only one where the arrow color reflects improvement.
+    const trendCell = (value, prevValue, unit, higherIsBetter) => {
+      const td = document.createElement("td");
+      td.style.padding = "6px 8px";
+      td.style.borderBottom = "1px solid #22303d";
+      let arrow = "";
+      if (prevValue !== null && prevValue !== undefined) {
+        const diff = value - prevValue;
+        if (Math.abs(diff) > 0.5) {
+          arrow = diff > 0 ? " ▲" : " ▼";
+          if (higherIsBetter !== null) {
+            const improved = higherIsBetter ? diff > 0 : diff < 0;
+            td.style.color = improved ? "var(--good)" : "var(--warn)";
+          }
+        }
+      }
+      td.textContent = `${value.toFixed(0)}${unit}${arrow}`;
+      return td;
+    };
+
+    row.appendChild(cell(entry.date));
+    row.appendChild(cell(entry.label || "—"));
+    row.appendChild(trendCell(entry.speedMph, prev?.speedMph, " mph", true));
+    row.appendChild(trendCell(entry.elbowAngle, prev?.elbowAngle, "°", null));
+    row.appendChild(trendCell(entry.frontKnee, prev?.frontKnee, "°", null));
+    row.appendChild(trendCell(entry.torsoLean, prev?.torsoLean, "°", null));
+    historyBody.appendChild(row);
+  });
+}
+
+// Fetch this signed-in user's swing history from Supabase and render it.
+async function renderHistoryFromServer() {
+  if (!plan.account) {
+    historyPanel.style.display = "none";
+    return;
+  }
+  const { data, error } = await supabase
+    .from("swings")
+    .select("created_at, label, speed_mph, elbow_angle, front_knee, torso_lean")
+    .eq("user_id", plan.account.id)
+    .order("created_at", { ascending: true });
+  if (error) {
+    console.error("Failed to load swing history:", error);
+    return;
+  }
+  const history = data.map((row) => ({
+    date: new Date(row.created_at).toLocaleDateString(),
+    label: row.label,
+    speedMph: row.speed_mph,
+    elbowAngle: row.elbow_angle,
+    frontKnee: row.front_knee,
+    torsoLean: row.torso_lean
+  }));
+  renderHistoryRows(history);
+}
+
+// Save a newly analyzed swing to Supabase (only signed-in users get
+// persistent history — there's no account to attach anonymous use to).
+async function saveHistoryEntry(entry) {
+  if (!plan.account) return;
+  const { error } = await supabase.from("swings").insert({
+    user_id: plan.account.id,
+    label: entry.label || null,
+    speed_mph: entry.speedMph,
+    elbow_angle: entry.elbowAngle,
+    front_knee: entry.frontKnee,
+    torso_lean: entry.torsoLean
+  });
+  if (error) console.error("Failed to save swing:", error);
+}
+
+clearHistoryBtn.addEventListener("click", async () => {
+  if (!plan.account) return;
+  const { error } = await supabase.from("swings").delete().eq("user_id", plan.account.id);
+  if (error) { console.error("Failed to clear history:", error); return; }
+  await renderHistoryFromServer();
+});
+
+// --- Account/paywall gating, now backed by real Supabase auth + DB ---
+// Anonymous (not-signed-in) usage still uses local storage, since there's
+// no account to attach it to yet — that part is unavoidable and fine.
+const ANON_KEY = "tennisAnalyzer.anonUsed";
+let plan = {
+  anonUsed: localStorage.getItem(ANON_KEY) === "true",
+  account: null,       // { id, email } once signed in
+  accountFreeUsed: false,
+  premium: false,
+  credits: 0
+};
+
+const planLabel = document.getElementById("planLabel");
+const planDetail = document.getElementById("planDetail");
+const gateOverlay = document.getElementById("gateOverlay");
+const gateTitle = document.getElementById("gateTitle");
+const gateBody = document.getElementById("gateBody");
+const gateSignupFields = document.getElementById("gateSignupFields");
+const gatePaywallFields = document.getElementById("gatePaywallFields");
+const gateAuthStatus = document.getElementById("gateAuthStatus");
+
+function renderPlanStatus() {
+  if (plan.premium) {
+    planLabel.textContent = "Plan: Premium";
+    planDetail.textContent = "Unlimited analyses.";
+  } else if (plan.account) {
+    planLabel.textContent = `Plan: Free account (${plan.account.email})`;
+    planDetail.textContent = plan.accountFreeUsed
+      ? `No free analyses left${plan.credits > 0 ? ` — ${plan.credits} paid credit(s) available` : ""}.`
+      : "1 free analysis available.";
+  } else {
+    planLabel.textContent = "Plan: Anonymous";
+    planDetail.textContent = plan.anonUsed
+      ? "Free analysis used — create an account for one more."
+      : "1 free analysis available, no account needed.";
+  }
+  accountBtn.textContent = plan.account ? "Sign out" : "Sign in / Create account";
+}
+const accountBtn = document.getElementById("accountBtn");
+renderPlanStatus();
+
+// Pull this signed-in user's plan row from Supabase.
+async function loadPlanFromServer(userId) {
+  const { data, error } = await supabase
+    .from("user_plan")
+    .select("account_free_used, premium, credits")
+    .eq("user_id", userId)
+    .single();
+  if (error) {
+    console.error("Failed to load plan:", error);
+    return;
+  }
+  plan.accountFreeUsed = data.account_free_used;
+  plan.premium = data.premium;
+  plan.credits = data.credits;
+  renderPlanStatus();
+}
+
+async function savePlanToServer() {
+  if (!plan.account) return;
+  const { error } = await supabase
+    .from("user_plan")
+    .update({
+      account_free_used: plan.accountFreeUsed,
+      premium: plan.premium,
+      credits: plan.credits,
+      updated_at: new Date().toISOString()
+    })
+    .eq("user_id", plan.account.id);
+  if (error) console.error("Failed to save plan:", error);
+}
+
+// Restore an existing session on page load (so refreshing doesn't sign you out).
+supabase.auth.getSession().then(async ({ data: { session } }) => {
+  if (session?.user) {
+    plan.account = { id: session.user.id, email: session.user.email };
+    await loadPlanFromServer(session.user.id);
+    await renderHistoryFromServer();
+    renderPlanStatus();
+  }
+
+  const params = new URLSearchParams(window.location.search);
+  if (params.get("checkout") === "success") {
+    statusEl.textContent = "Payment received — refreshing your plan…";
+    if (plan.account) await loadPlanFromServer(plan.account.id);
+    statusEl.textContent = "Payment received. You're all set.";
+  } else if (params.get("checkout") === "cancelled") {
+    statusEl.textContent = "Checkout cancelled.";
+  }
+  if (params.has("checkout")) {
+    params.delete("checkout");
+    const clean = window.location.pathname + (params.toString() ? `?${params}` : "");
+    window.history.replaceState({}, "", clean);
+  }
+});
+
+function canAnalyze() {
+  if (plan.premium) return true;
+  if (plan.credits > 0) return true;
+  if (!plan.account) return !plan.anonUsed;
+  return !plan.accountFreeUsed;
+}
+
+async function consumeAllowance() {
+  if (plan.premium) { /* unlimited */ }
+  else if (plan.credits > 0) { plan.credits -= 1; }
+  else if (!plan.account) {
+    plan.anonUsed = true;
+    localStorage.setItem(ANON_KEY, "true");
+  } else {
+    plan.accountFreeUsed = true;
+  }
+  if (plan.account) await savePlanToServer();
+  renderPlanStatus();
+}
+
+function showGate() {
+  gateAuthStatus.textContent = "";
+  if (!plan.account) {
+    gateTitle.textContent = "Create a free account";
+    gateBody.textContent = "You've used your free anonymous analysis. Create a free account to get one more.";
+    gateSignupFields.style.display = "block";
+    gatePaywallFields.style.display = "none";
+  } else {
+    gateTitle.textContent = "You're out of free analyses";
+    gateBody.textContent = "Subscribe for unlimited analyses, or pay for just this one. You'll be redirected to Stripe's secure checkout.";
+    gateSignupFields.style.display = "none";
+    gatePaywallFields.style.display = "block";
+  }
+  gateOverlay.style.display = "flex";
+}
+function hideGate() { gateOverlay.style.display = "none"; }
+
+document.getElementById("gateCancelBtn").addEventListener("click", hideGate);
+
+document.getElementById("gateSignupBtn").addEventListener("click", async () => {
+  const email = document.getElementById("gateEmail").value.trim();
+  const password = document.getElementById("gatePassword").value;
+  if (!email || password.length < 6) {
+    gateAuthStatus.textContent = "Enter an email and a password of at least 6 characters.";
+    return;
+  }
+  gateAuthStatus.textContent = "Creating account…";
+  const { data, error } = await supabase.auth.signUp({ email, password });
+  if (error) {
+    gateAuthStatus.textContent = error.message;
+    return;
+  }
+  if (!data.session) {
+    gateAuthStatus.textContent = "Check your email to confirm your account, then sign in.";
+    return;
+  }
+  plan.account = { id: data.user.id, email: data.user.email };
+  await loadPlanFromServer(data.user.id);
+  await renderHistoryFromServer();
+  hideGate();
+  statusEl.textContent = "Account created. Click Analyze Swing again.";
+});
+
+document.getElementById("gateSigninBtn").addEventListener("click", async () => {
+  const email = document.getElementById("gateEmail").value.trim();
+  const password = document.getElementById("gatePassword").value;
+  gateAuthStatus.textContent = "Signing in…";
+  const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+  if (error) {
+    gateAuthStatus.textContent = error.message;
+    return;
+  }
+  plan.account = { id: data.user.id, email: data.user.email };
+  await loadPlanFromServer(data.user.id);
+  await renderHistoryFromServer();
+  hideGate();
+  statusEl.textContent = "Signed in. Click Analyze Swing again.";
+});
+
+document.getElementById("gateSubscribeBtn").addEventListener("click", () => startCheckout("subscription"));
+document.getElementById("gatePayOnceBtn").addEventListener("click", () => startCheckout("payment"));
+
+async function startCheckout(mode) {
+  statusEl.textContent = "Redirecting to checkout…";
+  const { data, error } = await supabase.functions.invoke("create-checkout-session", {
+    body: { mode }
+  });
+  if (error || !data?.url) {
+    statusEl.textContent = "Couldn't start checkout — see console for details.";
+    console.error("Checkout error:", error);
+    return;
+  }
+  window.location.href = data.url; // Stripe's hosted checkout page
+}
+
+accountBtn.addEventListener("click", async () => {
+  if (plan.account) {
+    await supabase.auth.signOut();
+    plan.account = null;
+    plan.accountFreeUsed = false;
+    plan.premium = false;
+    plan.credits = 0;
+    renderPlanStatus();
+    historyPanel.style.display = "none";
+    statusEl.textContent = "Signed out.";
+  } else {
+    gateAuthStatus.textContent = "";
+    gateTitle.textContent = "Create a free account";
+    gateBody.textContent = "Creates a real account and unlocks one more free analysis.";
+    gateSignupFields.style.display = "block";
+    gatePaywallFields.style.display = "none";
+    gateOverlay.style.display = "flex";
+  }
+});
+
+document.getElementById("resetDemoBtn").addEventListener("click", () => {
+  localStorage.removeItem(ANON_KEY);
+  plan.anonUsed = false;
+  renderPlanStatus();
+  statusEl.textContent = "Anonymous usage state reset (signed-in accounts are unaffected).";
+});
+
+let poseLandmarker = null;
+let drawingUtils = null;
+let rafId = null;
+let videoReady = false;
+
+const LM = {
+  LEFT_SHOULDER: 11, RIGHT_SHOULDER: 12,
+  LEFT_ELBOW: 13, RIGHT_ELBOW: 14,
+  LEFT_WRIST: 15, RIGHT_WRIST: 16,
+  LEFT_HIP: 23, RIGHT_HIP: 24,
+  LEFT_KNEE: 25, RIGHT_KNEE: 26,
+  LEFT_ANKLE: 27, RIGHT_ANKLE: 28,
+  NOSE: 0
+};
+
+async function initModel() {
+  const vision = await FilesetResolver.forVisionTasks(
+    "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
+  );
+  poseLandmarker = await PoseLandmarker.createFromOptions(vision, {
+    baseOptions: {
+      modelAssetPath:
+        "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task",
+      delegate: "GPU"
+    },
+    runningMode: "VIDEO",
+    numPoses: 1
+  });
+  drawingUtils = new DrawingUtils(ctx);
+  statusEl.textContent = "Model ready. Upload a swing clip to begin.";
+  updateButtons();
+}
+initModel().catch((err) => {
+  statusEl.textContent = "Model failed to load: " + err.message;
+  console.error(err);
+});
+
+fileInput.addEventListener("change", () => {
+  const file = fileInput.files[0];
+  if (!file) return;
+  videoReady = false;
+  video.src = URL.createObjectURL(file);
+  video.load();
+  reportEl.style.display = "none";
+  statusEl.textContent = "Video loaded.";
+  updateButtons();
+});
+
+heightInput.addEventListener("input", updateButtons);
+
+video.addEventListener("loadedmetadata", () => {
+  canvas.width = video.videoWidth;
+  canvas.height = video.videoHeight;
+  videoReady = true;
+  updateButtons();
+});
+
+function updateButtons() {
+  const heightOk = parseFloat(heightInput.value) > 0;
+  analyzeBtn.disabled = !(poseLandmarker && videoReady && heightOk);
+  playBtn.disabled = !(poseLandmarker && videoReady);
+}
+
+// --- Geometry helpers (operate on normalized 0-1 landmark coords; angle
+// math is scale-invariant so normalized coords are fine there) ---
+function angleBetween(a, b, c) {
+  const ab = { x: a.x - b.x, y: a.y - b.y };
+  const cb = { x: c.x - b.x, y: c.y - b.y };
+  const dot = ab.x * cb.x + ab.y * cb.y;
+  const magAb = Math.hypot(ab.x, ab.y);
+  const magCb = Math.hypot(cb.x, cb.y);
+  if (magAb === 0 || magCb === 0) return null;
+  const cos = Math.min(1, Math.max(-1, dot / (magAb * magCb)));
+  return (Math.acos(cos) * 180) / Math.PI;
+}
+
+function torsoLeanDeg(landmarks) {
+  const midShoulder = {
+    x: (landmarks[LM.LEFT_SHOULDER].x + landmarks[LM.RIGHT_SHOULDER].x) / 2,
+    y: (landmarks[LM.LEFT_SHOULDER].y + landmarks[LM.RIGHT_SHOULDER].y) / 2
+  };
+  const midHip = {
+    x: (landmarks[LM.LEFT_HIP].x + landmarks[LM.RIGHT_HIP].x) / 2,
+    y: (landmarks[LM.LEFT_HIP].y + landmarks[LM.RIGHT_HIP].y) / 2
+  };
+  const dx = midShoulder.x - midHip.x;
+  const dy = midShoulder.y - midHip.y; // negative if shoulder is above hip, as expected
+  return (Math.atan2(dx, -dy) * 180) / Math.PI;
+}
+
+// --- Seek-based frame-by-frame pass, so we don't drop frames like
+// realtime playback would ---
+function seekTo(t) {
+  return new Promise((resolve) => {
+    function onSeeked() {
+      video.removeEventListener("seeked", onSeeked);
+      resolve();
+    }
+    video.addEventListener("seeked", onSeeked);
+    video.currentTime = t;
+  });
+}
+
+analyzeBtn.addEventListener("click", async () => {
+  if (!canAnalyze()) {
+    showGate();
+    return;
+  }
+  analyzeBtn.disabled = true;
+  playBtn.disabled = true;
+  reportEl.style.display = "none";
+  video.pause();
+
+  const duration = video.duration;
+  const stepSec = 1 / 25; // ~25 samples per second of footage
+  const frames = [];
+  let t = 0;
+  let msTimestamp = 0;
+
+  statusEl.textContent = "Analyzing…";
+  while (t <= duration) {
+    await seekTo(t);
+    msTimestamp += 1000 / 25;
+    const result = poseLandmarker.detectForVideo(video, Math.round(msTimestamp));
+    if (result.landmarks && result.landmarks.length > 0) {
+      frames.push({ t, landmarks: result.landmarks[0] });
+    }
+    progressFill.style.width = `${Math.min(100, (t / duration) * 100)}%`;
+    t += stepSec;
+  }
+
+  statusEl.textContent = `Analyzed ${frames.length} frames. Computing metrics…`;
+  await computeReport(frames);
+});
+
+async function computeReport(frames) {
+  if (frames.length < 3) {
+    statusEl.textContent = "Not enough tracked frames — try a clearer clip.";
+    analyzeBtn.disabled = false;
+    playBtn.disabled = false;
+    return;
+  }
+
+  // 1. Calibration: find the frame with the largest nose-to-ankle pixel
+  // span, treated as the most upright, full-height moment (e.g. ready
+  // position). Approximates ~93% of true standing height.
+  let calibFrame = frames[0];
+  let maxSpan = -Infinity;
+  for (const f of frames) {
+    const nose = f.landmarks[LM.NOSE];
+    const ankleY = (f.landmarks[LM.LEFT_ANKLE].y + f.landmarks[LM.RIGHT_ANKLE].y) / 2;
+    const span = Math.abs(ankleY - nose.y) * canvas.height;
+    if (span > maxSpan) { maxSpan = span; calibFrame = f; }
+  }
+  const heightCm = parseFloat(heightInput.value);
+  const heightM = heightCm / 100;
+  const metersPerPixel = (heightM * 0.93) / maxSpan;
+
+  // 2. Right-wrist speed across consecutive tracked frames.
+  let peak = { speedMs: 0, frame: frames[0] };
+  for (let i = 1; i < frames.length; i++) {
+    const prev = frames[i - 1];
+    const cur = frames[i];
+    const dt = cur.t - prev.t;
+    if (dt <= 0) continue;
+    const w1 = prev.landmarks[LM.RIGHT_WRIST];
+    const w2 = cur.landmarks[LM.RIGHT_WRIST];
+    const dxPx = (w2.x - w1.x) * canvas.width;
+    const dyPx = (w2.y - w1.y) * canvas.height;
+    const distPx = Math.hypot(dxPx, dyPx);
+    const speedMs = (distPx * metersPerPixel) / dt;
+    if (speedMs > peak.speedMs) {
+      peak = { speedMs, frame: cur };
+    }
+  }
+
+  const contactLandmarks = peak.frame.landmarks;
+  const elbowAngle = angleBetween(
+    contactLandmarks[LM.RIGHT_SHOULDER],
+    contactLandmarks[LM.RIGHT_ELBOW],
+    contactLandmarks[LM.RIGHT_WRIST]
+  );
+  const leftKnee = angleBetween(
+    contactLandmarks[LM.LEFT_HIP], contactLandmarks[LM.LEFT_KNEE], contactLandmarks[LM.LEFT_ANKLE]
+  );
+  const rightKnee = angleBetween(
+    contactLandmarks[LM.RIGHT_HIP], contactLandmarks[LM.RIGHT_KNEE], contactLandmarks[LM.RIGHT_ANKLE]
+  );
+  const frontKnee = Math.min(leftKnee ?? 180, rightKnee ?? 180);
+  const torsoLean = torsoLeanDeg(contactLandmarks);
+
+  const speedMph = peak.speedMs * 2.237;
+  const speedKmh = peak.speedMs * 3.6;
+
+  document.getElementById("mSpeed").textContent = `${speedMph.toFixed(0)} mph (${speedKmh.toFixed(0)} km/h)`;
+  document.getElementById("mElbow").textContent = elbowAngle ? `${elbowAngle.toFixed(0)}°` : "—";
+  document.getElementById("mKnee").textContent = `${frontKnee.toFixed(0)}°`;
+  document.getElementById("mTorso").textContent = `${torsoLean.toFixed(0)}° from vertical`;
+
+  renderFeedback({ elbowAngle, frontKnee, torsoLean });
+
+  await saveHistoryEntry({
+    label: labelInput.value.trim(),
+    speedMph,
+    elbowAngle,
+    frontKnee,
+    torsoLean
+  });
+  await renderHistoryFromServer();
+
+  await consumeAllowance();
+
+  reportEl.style.display = "block";
+  statusEl.textContent = "Analysis complete.";
+  analyzeBtn.disabled = false;
+  playBtn.disabled = false;
+
+  // Draw the contact-point skeleton as a static snapshot for reference.
+  seekTo(peak.frame.t).then(() => {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    drawingUtils.drawLandmarks(contactLandmarks);
+    drawingUtils.drawConnectors(contactLandmarks, PoseLandmarker.POSE_CONNECTIONS);
+  });
+}
+
+function renderFeedback({ elbowAngle, frontKnee, torsoLean }) {
+  feedbackListEl.innerHTML = "";
+  const items = [];
+
+  // --- Elbow angle at contact ---
+  if (elbowAngle !== null) {
+    const meaning = "What it means: how straight your arm is at the moment your racket meets the ball. A more extended arm generally means a more consistent, repeatable contact point and better reach and leverage on the shot.";
+    if (elbowAngle < 140) {
+      items.push({
+        type: "warn",
+        verdict: "Likely worth adjusting",
+        text: `${meaning} Yours measured ~${elbowAngle.toFixed(0)}°, which is fairly bent — this often means contact is happening a bit late or too close to the body, costing you reach and power. Try extending the arm more fully into the ball.`
+      });
+    } else if (elbowAngle <= 170) {
+      items.push({
+        type: "good",
+        verdict: "Good",
+        text: `${meaning} Yours measured ~${elbowAngle.toFixed(0)}°, which sits in a solid range — extended but not locked out.`
+      });
+    } else {
+      items.push({
+        type: "warn",
+        verdict: "Likely worth adjusting",
+        text: `${meaning} Yours measured ~${elbowAngle.toFixed(0)}°, which is nearly fully locked straight — this can reduce your ability to absorb and redirect pace, and adds strain on the elbow joint. A very slight bend is usually more resilient.`
+      });
+    }
+  }
+
+  // --- Front-knee bend at contact ---
+  const kneeMeaning = "What it means: how much your leading leg is bent at contact. Some knee bend lets you push up and forward through the shot, driving power from your legs rather than your arm alone.";
+  if (frontKnee > 165) {
+    items.push({
+      type: "warn",
+      verdict: "Likely worth adjusting",
+      text: `${kneeMeaning} Yours measured ~${frontKnee.toFixed(0)}°, which is nearly straight — you're probably relying mostly on arm and torso for power. Try loading more into the legs before contact.`
+    });
+  } else if (frontKnee < 120) {
+    items.push({
+      type: "warn",
+      verdict: "Worth checking",
+      text: `${kneeMeaning} Yours measured ~${frontKnee.toFixed(0)}°, quite deep — this can be fine for a low ball, but if it's happening on standard-height balls it may point to being off-balance or reaching, rather than a deliberate deep load.`
+    });
+  } else {
+    items.push({
+      type: "good",
+      verdict: "Good",
+      text: `${kneeMeaning} Yours measured ~${frontKnee.toFixed(0)}°, which is a reasonable, athletic amount of bend for driving power.`
+    });
+  }
+
+  // --- Torso lean at contact ---
+  const leanMeaning = "What it means: how far your upper body is tilted away from vertical at contact. Some players lean into the shot for power, but a large uncontrolled lean (especially backward, away from the ball) usually signals being rushed, off-balance, or reaching.";
+  const absLean = Math.abs(torsoLean);
+  if (absLean <= 15) {
+    items.push({
+      type: "good",
+      verdict: "Good",
+      text: `${leanMeaning} Yours measured ~${absLean.toFixed(0)}° from vertical, which is fairly upright and balanced.`
+    });
+  } else if (absLean <= 30) {
+    items.push({
+      type: "neutral",
+      verdict: "Depends on intent",
+      text: `${leanMeaning} Yours measured ~${absLean.toFixed(0)}° from vertical — a moderate lean. This can be a deliberate part of the swing (e.g. leaning into a forehand), so it's only a concern if it feels unintentional. Note: this prototype can't yet tell forward lean from backward lean, which matters more than the raw angle — that's a good next improvement.`
+    });
+  } else {
+    items.push({
+      type: "warn",
+      verdict: "Worth checking",
+      text: `${leanMeaning} Yours measured ~${absLean.toFixed(0)}° from vertical, which is a large lean — worth checking whether you're being rushed or reaching for the ball rather than meeting it in a balanced position.`
+    });
+  }
+
+  for (const item of items) {
+    const li = document.createElement("li");
+    li.className = item.type === "neutral" ? "" : item.type;
+    const strong = document.createElement("strong");
+    strong.textContent = item.verdict + ": ";
+    li.appendChild(strong);
+    li.appendChild(document.createTextNode(item.text));
+    feedbackListEl.appendChild(li);
+  }
+}
+
+// --- Optional real-time playback with live overlay, for visual sanity-check ---
+playBtn.addEventListener("click", () => {
+  video.play();
+  loop();
+});
+video.addEventListener("pause", () => { if (rafId) cancelAnimationFrame(rafId); });
+
+let lastVideoTime = -1;
+function loop() {
+  if (video.paused || video.ended) return;
+  if (video.currentTime !== lastVideoTime) {
+    lastVideoTime = video.currentTime;
+    const result = poseLandmarker.detectForVideo(video, performance.now());
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    if (result.landmarks && result.landmarks.length > 0) {
+      const landmarks = result.landmarks[0];
+      drawingUtils.drawLandmarks(landmarks);
+      drawingUtils.drawConnectors(landmarks, PoseLandmarker.POSE_CONNECTIONS);
+    }
+  }
+  rafId = requestAnimationFrame(loop);
+}
+</script>
+
+</body>
+</html>
