@@ -213,7 +213,7 @@
 
 <div class="panel" id="historyPanel" style="max-width: 980px; margin-top: 24px; display:none;">
   <h2 style="display:flex; justify-content:space-between; align-items:center;">
-    <span>Your progress (pro-tier concept: saved locally in this browser)</span>
+    <span>Your progress (saved to your account)</span>
     <button id="clearHistoryBtn" class="secondary" style="width:auto; padding:6px 12px; font-size:12px;">Clear history</button>
   </h2>
   <table id="historyTable" style="width:100%; border-collapse: collapse; font-size:13px;">
@@ -230,11 +230,10 @@
     <tbody id="historyBody"></tbody>
   </table>
   <p class="caveat">
-    This is a working demo of what a "pro" tier could offer: every analyzed
-    swing is saved (right now, just in this browser's local storage) so you
-    can see trends across sessions instead of a one-off score. A real
-    pro version would sync this to an account so it follows you across
-    devices, and would chart trends visually rather than just listing rows.
+    Every analyzed swing is saved to your account (Postgres via Supabase,
+    protected by row-level security so only you can read it), so you can
+    see trends across sessions and devices instead of a one-off score.
+    Arrows show direction of change since the previous session.
   </p>
 </div>
 
@@ -252,7 +251,11 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 // (set up in supabase-schema.sql) is what actually protects the data.
 const SUPABASE_URL = "YOUR_SUPABASE_PROJECT_URL";
 const SUPABASE_ANON_KEY = "YOUR_SUPABASE_ANON_KEY";
-const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+// Until the values above are filled in, the analyzer still runs fully
+// client-side; accounts, history, and payments are disabled.
+const SUPABASE_CONFIGURED = /^https?:\/\//.test(SUPABASE_URL) && !SUPABASE_ANON_KEY.startsWith("YOUR_");
+const supabase = SUPABASE_CONFIGURED ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY) : null;
+const BACKEND_MISSING_MSG = "Accounts aren't set up on this deployment (see README: Supabase setup). Analysis still works without one.";
 
 const statusEl = document.getElementById("status");
 const video = document.getElementById("video");
@@ -441,7 +444,7 @@ async function savePlanToServer() {
 }
 
 // Restore an existing session on page load (so refreshing doesn't sign you out).
-supabase.auth.getSession().then(async ({ data: { session } }) => {
+if (supabase) supabase.auth.getSession().then(async ({ data: { session } }) => {
   if (session?.user) {
     plan.account = { id: session.user.id, email: session.user.email };
     await loadPlanFromServer(session.user.id);
@@ -506,6 +509,7 @@ document.getElementById("gateCancelBtn").addEventListener("click", hideGate);
 document.getElementById("gateSignupBtn").addEventListener("click", async () => {
   const email = document.getElementById("gateEmail").value.trim();
   const password = document.getElementById("gatePassword").value;
+  if (!supabase) { gateAuthStatus.textContent = BACKEND_MISSING_MSG; return; }
   if (!email || password.length < 6) {
     gateAuthStatus.textContent = "Enter an email and a password of at least 6 characters.";
     return;
@@ -530,6 +534,7 @@ document.getElementById("gateSignupBtn").addEventListener("click", async () => {
 document.getElementById("gateSigninBtn").addEventListener("click", async () => {
   const email = document.getElementById("gateEmail").value.trim();
   const password = document.getElementById("gatePassword").value;
+  if (!supabase) { gateAuthStatus.textContent = BACKEND_MISSING_MSG; return; }
   gateAuthStatus.textContent = "Signing in…";
   const { data, error } = await supabase.auth.signInWithPassword({ email, password });
   if (error) {
@@ -547,6 +552,7 @@ document.getElementById("gateSubscribeBtn").addEventListener("click", () => star
 document.getElementById("gatePayOnceBtn").addEventListener("click", () => startCheckout("payment"));
 
 async function startCheckout(mode) {
+  if (!supabase) { statusEl.textContent = BACKEND_MISSING_MSG; return; }
   statusEl.textContent = "Redirecting to checkout…";
   const { data, error } = await supabase.functions.invoke("create-checkout-session", {
     body: { mode }
@@ -677,7 +683,10 @@ function torsoLeanDeg(landmarks) {
 }
 
 // --- Seek-based frame-by-frame pass, so we don't drop frames like
-// realtime playback would ---
+// realtime playback would. Browsers don't expose a clip's native frame
+// rate, so we step at 30 fps (the most common phone recording rate). ---
+const SAMPLE_FPS = 30;
+
 function seekTo(t) {
   return new Promise((resolve) => {
     function onSeeked() {
@@ -700,7 +709,7 @@ analyzeBtn.addEventListener("click", async () => {
   video.pause();
 
   const duration = video.duration;
-  const stepSec = 1 / 25; // ~25 samples per second of footage
+  const stepSec = 1 / SAMPLE_FPS;
   const frames = [];
   let t = 0;
   let msTimestamp = 0;
@@ -708,7 +717,7 @@ analyzeBtn.addEventListener("click", async () => {
   statusEl.textContent = "Analyzing…";
   while (t <= duration) {
     await seekTo(t);
-    msTimestamp += 1000 / 25;
+    msTimestamp += 1000 / SAMPLE_FPS;
     const result = poseLandmarker.detectForVideo(video, Math.round(msTimestamp));
     if (result.landmarks && result.landmarks.length > 0) {
       frames.push({ t, landmarks: result.landmarks[0] });
@@ -785,7 +794,8 @@ async function computeReport(frames) {
   document.getElementById("mKnee").textContent = `${frontKnee.toFixed(0)}°`;
   document.getElementById("mTorso").textContent = `${torsoLean.toFixed(0)}° from vertical`;
 
-  renderFeedback({ elbowAngle, frontKnee, torsoLean });
+  const feedback = evaluateMetrics({ elbowAngle, frontKnee, torsoLean });
+  renderFeedback(feedback);
 
   await saveHistoryEntry({
     label: labelInput.value.trim(),
@@ -803,16 +813,115 @@ async function computeReport(frames) {
   analyzeBtn.disabled = false;
   playBtn.disabled = false;
 
-  // Draw the contact-point skeleton as a static snapshot for reference.
+  // Freeze the video on the contact frame and draw the skeleton plus each
+  // metric's value and verdict next to the joint it was measured at.
   seekTo(peak.frame.t).then(() => {
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    drawingUtils.drawLandmarks(contactLandmarks);
-    drawingUtils.drawConnectors(contactLandmarks, PoseLandmarker.POSE_CONNECTIONS);
+    drawContactOverlay(contactLandmarks, feedback, {
+      speedMph,
+      frontKneeSide: (leftKnee ?? 180) <= (rightKnee ?? 180) ? "LEFT" : "RIGHT"
+    });
   });
 }
 
-function renderFeedback({ elbowAngle, frontKnee, torsoLean }) {
-  feedbackListEl.innerHTML = "";
+const VERDICT_COLORS = { good: "#6fdc8c", warn: "#ffb74d", neutral: "#8a97a6" };
+
+function drawContactOverlay(landmarks, feedback, { speedMph, frontKneeSide }) {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  drawingUtils.drawConnectors(landmarks, PoseLandmarker.POSE_CONNECTIONS, { color: "rgba(255,255,255,0.6)", lineWidth: 3 });
+  drawingUtils.drawLandmarks(landmarks, { color: "#d4ff3f", fillColor: "#d4ff3f", radius: 4 });
+
+  const px = (lm) => ({ x: lm.x * canvas.width, y: lm.y * canvas.height });
+  const scale = canvas.height / 720;
+  const fontPx = Math.round(20 * scale);
+  ctx.font = `600 ${fontPx}px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif`;
+  ctx.textBaseline = "middle";
+  ctx.lineWidth = Math.max(2, 3 * scale);
+
+  const drawAngleArc = (a, b, c, color) => {
+    const B = px(b);
+    const start = Math.atan2(px(a).y - B.y, px(a).x - B.x);
+    const end = Math.atan2(px(c).y - B.y, px(c).x - B.x);
+    let sweep = end - start;
+    while (sweep <= -Math.PI) sweep += 2 * Math.PI;
+    while (sweep > Math.PI) sweep -= 2 * Math.PI;
+    ctx.strokeStyle = color;
+    ctx.beginPath();
+    ctx.arc(B.x, B.y, 28 * scale, start, start + sweep, sweep < 0);
+    ctx.stroke();
+  };
+
+  const drawLabel = (anchor, lines, color, side = "right") => {
+    const pad = 8 * scale;
+    const lineH = fontPx * 1.3;
+    const width = Math.max(...lines.map((l) => ctx.measureText(l).width)) + pad * 2;
+    const height = lineH * lines.length + pad;
+    let x = side === "right" ? anchor.x + 36 * scale : anchor.x - 36 * scale - width;
+    let y = anchor.y - height / 2;
+    if (x + width > canvas.width) x = anchor.x - 36 * scale - width;
+    if (x < 0) x = anchor.x + 36 * scale;
+    y = Math.min(Math.max(y, 0), canvas.height - height);
+    ctx.fillStyle = "rgba(18,24,31,0.85)";
+    ctx.fillRect(x, y, width, height);
+    ctx.fillStyle = color;
+    ctx.fillRect(x, y, 4 * scale, height);
+    ctx.fillStyle = "#e8ecef";
+    lines.forEach((l, i) => ctx.fillText(l, x + pad + 2 * scale, y + pad / 2 + lineH * (i + 0.5)));
+  };
+
+  const byMetric = Object.fromEntries(feedback.map((f) => [f.metric, f]));
+
+  const elbow = byMetric.elbow;
+  if (elbow) {
+    const color = VERDICT_COLORS[elbow.type];
+    drawAngleArc(landmarks[LM.RIGHT_SHOULDER], landmarks[LM.RIGHT_ELBOW], landmarks[LM.RIGHT_WRIST], color);
+    drawLabel(px(landmarks[LM.RIGHT_ELBOW]), [`Elbow ${elbow.value.toFixed(0)}°`, elbow.verdict], color);
+  }
+
+  const knee = byMetric.knee;
+  if (knee) {
+    const color = VERDICT_COLORS[knee.type];
+    drawAngleArc(landmarks[LM[`${frontKneeSide}_HIP`]], landmarks[LM[`${frontKneeSide}_KNEE`]], landmarks[LM[`${frontKneeSide}_ANKLE`]], color);
+    drawLabel(px(landmarks[LM[`${frontKneeSide}_KNEE`]]), [`Knee ${knee.value.toFixed(0)}°`, knee.verdict], color);
+  }
+
+  const torso = byMetric.torso;
+  if (torso) {
+    const color = VERDICT_COLORS[torso.type];
+    const midShoulder = px({
+      x: (landmarks[LM.LEFT_SHOULDER].x + landmarks[LM.RIGHT_SHOULDER].x) / 2,
+      y: (landmarks[LM.LEFT_SHOULDER].y + landmarks[LM.RIGHT_SHOULDER].y) / 2
+    });
+    const midHip = px({
+      x: (landmarks[LM.LEFT_HIP].x + landmarks[LM.RIGHT_HIP].x) / 2,
+      y: (landmarks[LM.LEFT_HIP].y + landmarks[LM.RIGHT_HIP].y) / 2
+    });
+    ctx.strokeStyle = color;
+    ctx.beginPath();
+    ctx.moveTo(midHip.x, midHip.y);
+    ctx.lineTo(midShoulder.x, midShoulder.y);
+    ctx.stroke();
+    ctx.setLineDash([6 * scale, 6 * scale]);
+    ctx.strokeStyle = "rgba(255,255,255,0.5)";
+    ctx.beginPath();
+    ctx.moveTo(midHip.x, midHip.y);
+    ctx.lineTo(midHip.x, midShoulder.y);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    drawLabel({ x: midHip.x, y: (midHip.y + midShoulder.y) / 2 }, [`Lean ${torso.value.toFixed(0)}°`, torso.verdict], color, "left");
+  }
+
+  const wrist = px(landmarks[LM.RIGHT_WRIST]);
+  ctx.strokeStyle = "#d4ff3f";
+  ctx.beginPath();
+  ctx.arc(wrist.x, wrist.y, 14 * scale, 0, 2 * Math.PI);
+  ctx.stroke();
+  drawLabel(wrist, [`Peak ${speedMph.toFixed(0)} mph`, "Contact (est.)"], "#d4ff3f");
+}
+
+// Threshold rules for each metric. Returns one entry per metric with the
+// measured value, a verdict, and an explanation; consumed by both the
+// feedback list and the canvas overlay.
+function evaluateMetrics({ elbowAngle, frontKnee, torsoLean }) {
   const items = [];
 
   // --- Elbow angle at contact ---
@@ -820,18 +929,21 @@ function renderFeedback({ elbowAngle, frontKnee, torsoLean }) {
     const meaning = "What it means: how straight your arm is at the moment your racket meets the ball. A more extended arm generally means a more consistent, repeatable contact point and better reach and leverage on the shot.";
     if (elbowAngle < 140) {
       items.push({
+        metric: "elbow", value: elbowAngle,
         type: "warn",
         verdict: "Likely worth adjusting",
         text: `${meaning} Yours measured ~${elbowAngle.toFixed(0)}°, which is fairly bent — this often means contact is happening a bit late or too close to the body, costing you reach and power. Try extending the arm more fully into the ball.`
       });
     } else if (elbowAngle <= 170) {
       items.push({
+        metric: "elbow", value: elbowAngle,
         type: "good",
         verdict: "Good",
         text: `${meaning} Yours measured ~${elbowAngle.toFixed(0)}°, which sits in a solid range — extended but not locked out.`
       });
     } else {
       items.push({
+        metric: "elbow", value: elbowAngle,
         type: "warn",
         verdict: "Likely worth adjusting",
         text: `${meaning} Yours measured ~${elbowAngle.toFixed(0)}°, which is nearly fully locked straight — this can reduce your ability to absorb and redirect pace, and adds strain on the elbow joint. A very slight bend is usually more resilient.`
@@ -843,18 +955,21 @@ function renderFeedback({ elbowAngle, frontKnee, torsoLean }) {
   const kneeMeaning = "What it means: how much your leading leg is bent at contact. Some knee bend lets you push up and forward through the shot, driving power from your legs rather than your arm alone.";
   if (frontKnee > 165) {
     items.push({
+      metric: "knee", value: frontKnee,
       type: "warn",
       verdict: "Likely worth adjusting",
       text: `${kneeMeaning} Yours measured ~${frontKnee.toFixed(0)}°, which is nearly straight — you're probably relying mostly on arm and torso for power. Try loading more into the legs before contact.`
     });
   } else if (frontKnee < 120) {
     items.push({
+      metric: "knee", value: frontKnee,
       type: "warn",
       verdict: "Worth checking",
       text: `${kneeMeaning} Yours measured ~${frontKnee.toFixed(0)}°, quite deep — this can be fine for a low ball, but if it's happening on standard-height balls it may point to being off-balance or reaching, rather than a deliberate deep load.`
     });
   } else {
     items.push({
+      metric: "knee", value: frontKnee,
       type: "good",
       verdict: "Good",
       text: `${kneeMeaning} Yours measured ~${frontKnee.toFixed(0)}°, which is a reasonable, athletic amount of bend for driving power.`
@@ -866,24 +981,32 @@ function renderFeedback({ elbowAngle, frontKnee, torsoLean }) {
   const absLean = Math.abs(torsoLean);
   if (absLean <= 15) {
     items.push({
+      metric: "torso", value: absLean,
       type: "good",
       verdict: "Good",
       text: `${leanMeaning} Yours measured ~${absLean.toFixed(0)}° from vertical, which is fairly upright and balanced.`
     });
   } else if (absLean <= 30) {
     items.push({
+      metric: "torso", value: absLean,
       type: "neutral",
       verdict: "Depends on intent",
       text: `${leanMeaning} Yours measured ~${absLean.toFixed(0)}° from vertical — a moderate lean. This can be a deliberate part of the swing (e.g. leaning into a forehand), so it's only a concern if it feels unintentional. Note: this prototype can't yet tell forward lean from backward lean, which matters more than the raw angle — that's a good next improvement.`
     });
   } else {
     items.push({
+      metric: "torso", value: absLean,
       type: "warn",
       verdict: "Worth checking",
       text: `${leanMeaning} Yours measured ~${absLean.toFixed(0)}° from vertical, which is a large lean — worth checking whether you're being rushed or reaching for the ball rather than meeting it in a balanced position.`
     });
   }
 
+  return items;
+}
+
+function renderFeedback(items) {
+  feedbackListEl.innerHTML = "";
   for (const item of items) {
     const li = document.createElement("li");
     li.className = item.type === "neutral" ? "" : item.type;
